@@ -1,5 +1,9 @@
 # Station command router
 
+Prerequisites, device access guides and related projects:
+[station preparation](../docs/PREREQUISITES.md). This router assumes an already
+working root/SSH connection and the compatible native voice interfaces described there.
+
 Separate standard-library Go process for Linux ARM64. It does not modify the
 accepted voice binary, runtime environment, microphone, TTS, focus or display.
 It consumes exact recognized commands and submits the existing `select` control

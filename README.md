@@ -35,6 +35,20 @@ Copyright © 2026 Startupingarage. Все права защищены.
 ## Условия запуска
 
 Это приложение для уже настроенной колонки, а не установщик ChatGPT на Станцию.
+Начните с [предварительных условий и подготовки колонки](docs/PREREQUISITES.md):
+там приведены инструкции получения root/SSH, внешние проекты и точные требования
+к голосовому клиенту и обработчику команд.
+
+Основные внешние материалы:
+
+- [HackAlice / Yandex Station Extended](https://hackalice.me/) и
+  [репозиторий вики](https://github.com/Marker284/yandex-station-extended) — доступ к устройству;
+  [отдельная инструкция для Лайт 2](https://hackalice.me/start/retail-ca/).
+- [eQuasar](https://git.gay/iwakura/eQuasar) — инструмент подготовки доступа,
+  описанный в руководстве HackAlice.
+- [Alisa Voice](https://github.com/rison1337/Alisa-ChatGPT-voice-assistant) —
+  самостоятельная установка голосового ChatGPT на подготовленную колонку.
+
 Персональная интеграция использует WSL-дистрибутив `StationLab`, пользователя
 `stationuser` и SSH-узел `station` из `/home/stationuser/kas-live/ssh_config`.
 Точки интеграции находятся в `backend.py`; секреты в код не включены.
