@@ -1,0 +1,2 @@
+pywebview==6.2.1
+curl_cffi==0.17.0
