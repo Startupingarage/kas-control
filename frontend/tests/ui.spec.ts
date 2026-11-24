@@ -133,7 +133,7 @@ test('new chat can save its call phrase without connecting Voice',async({page})=
 test('web login refreshes projects without changing the voice session',async({page})=>{
   await page.goto('/?demo=1');
   await page.getByRole('button',{name:'Войти в ChatGPT',exact:true}).click();
-  await expect.poll(()=>page.evaluate(()=>window.__demoCalls?.slice(-3))).toEqual(['login_chatgpt','bootstrap','list_chats']);
+  await expect.poll(()=>page.evaluate(()=>window.__demoCalls?.slice(-3))).toEqual(['login_chatgpt','bootstrap_local','list_chats']);
   await expect(page.locator('.station-summary')).toContainText('Кас подключён');
 });
 
@@ -161,7 +161,7 @@ test('closing refreshes the settled station state automatically',async({page})=>
   await page.goto('/?demo=1');
   await page.getByRole('button',{name:'Закрыть сеанс',exact:true}).click();
   await expect(page.locator('.station-summary')).toContainText('Голосовой сеанс закрыт');
-  expect(await page.evaluate(()=>window.__demoCalls?.slice(-3))).toEqual(['close_session','bootstrap','list_chats']);
+  expect(await page.evaluate(()=>window.__demoCalls?.slice(-3))).toEqual(['close_session','bootstrap_local','list_chats']);
 });
 
 test('waits for methods when WebView2 initially exposes an empty API object',async({page})=>{

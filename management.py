@@ -17,6 +17,7 @@ class Manager:
         self.station = self.controller.station
         self.cloud = self.controller.cloud
         self.store = store or RouteStore(self.station)
+        self._projects=[]
 
     def _ready(self):
         status = self.store.health()
@@ -24,6 +25,9 @@ class Manager:
         if not all(f in features and (not isinstance(features, dict) or features[f])
                    for f in ('catalog', 'lazy_registration')):
             raise ControlError('Обновите обработчик колонки: управление без запуска Voice пока недоступно.')
+
+    def set_voice(self,voice):
+        return self.station.set_voice(voice)
 
     def _project(self, project):
         validate_id(project)
@@ -72,32 +76,50 @@ class Manager:
         return self._rows(project, self._document(), self.station.read_settings(), self.cloud.chats(project))
 
     def bootstrap(self):
-        projects = self.cloud.projects()
-        doc = self._document()
-        settings = self.station.read_settings()
-        state = self.station.status()
+        return self._bootstrap(self.cloud_projects(),self.station.management_snapshot())
+
+    def cloud_projects(self):
+        projects=self.cloud.projects();self._projects=projects
+        return projects
+
+    def bootstrap_local(self):
+        snapshot=self.station.management_snapshot();doc=snapshot['routes']
+        projects={p['id']:p for p in self._projects}
+        for entry in doc.get('catalog',[]):
+            project=entry.get('project_id')
+            if project and project not in projects:
+                projects[project]={'id':validate_id(project),'name':entry.get('project_name') or entry.get('title') or 'Проект'}
+        return self._bootstrap(list(projects.values()),snapshot)
+
+    def _bootstrap(self,projects,snapshot):
+        doc=snapshot['routes'];doc.setdefault('catalog',[])
+        if not isinstance(doc['catalog'],list) or len(doc['catalog'])>64:raise ControlError('Неизвестный каталог колонки.')
+        self.store.hash=snapshot['routes_hash']
+        settings=snapshot['settings'];state=snapshot['state']
         selected = next((c for c in settings['chats'] if c['id'] == settings.get('selected')), {})
         entry = next((c for c in doc['catalog'] if c['chat_id'] == selected.get('id')), {})
-        try:
-            self._ready(); ready = True
-        except ControlError:
-            ready = False
+        health=snapshot['health']
+        ready=bool(health.get('ready') and health.get('connected') and 0<=snapshot['now']-health.get('updated_unix',0)<=5
+                   and all(f in health.get('features',[]) for f in ('catalog','lazy_registration')))
         names = {p['id']: p['name'] for p in projects}
         catalog = {c['chat_id']: c for c in doc['catalog']}
         routes = [{**r, 'title': catalog.get(r['chat_id'], {}).get('title', r.get('title', 'Без названия')),
                    'project_name': names.get(r['project_id'], r.get('project_name', 'Проект'))} for r in doc['routes']]
-        return {'projects': projects, 'current': {
+        return {'project_sessions': bool(doc.get('project_sessions')), 'project_status': self.project_status(settings, state, doc), 'projects': projects, 'current': {
             'project_id': selected.get('gizmo_id', ''), 'key': 'local:' + selected['id'] if selected else '',
             'chat_id': selected.get('id', ''), 'title': entry.get('title') or selected.get('title', ''),
             'conversation_id': selected.get('conversation_id', ''), 'phase': state.get('phase'),
             'voice': settings.get('voice')}, 'router_ready': ready,
-            'native_commands': [{'action': a, 'phrase': p} for a, p in self.store.native_commands()], 'routes': routes}
+            'native_commands': [{'action': a, 'phrase': p} for a, p in snapshot['commands']], 'routes': routes}
 
     def create_project(self, name):
         self._ready()
-        return create_project(self.cloud, name)
+        project=create_project(self.cloud, name)
+        self._projects=[p for p in self._projects if p['id']!=project['id']]+[project]
+        return project
 
     def create_chat(self, project, title, phrase=''):
+        if self._document().get('project_sessions'): raise ControlError('В режиме проектов используйте команду проекта и новый разговор.')
         self._ready()
         name = self._project(project)
         if (not isinstance(title, str) or not title.strip() or len(title.encode('utf-8', 'replace')) > 120
@@ -165,6 +187,7 @@ class Manager:
         return routes + [{**entry, 'phrase': phrase}]
 
     def save_command(self, project, key, phrase):
+        if self._document().get('project_sessions'): raise ControlError('В режиме проектов используйте команду проекта и новый разговор.')
         self._ready()
         doc = self._document()
         entry = self._resolve(project, key, doc)
@@ -175,6 +198,7 @@ class Manager:
         return {'phrase': routes[-1]['phrase']}
 
     def remove_command(self, project, key):
+        if self._document().get('project_sessions'): raise ControlError('В режиме проектов используйте команду проекта и новый разговор.')
         self._ready()
         doc = self._document()
         # Removal remains possible when a formerly saved cloud chat is now archived.
@@ -187,6 +211,7 @@ class Manager:
         return {}
 
     def connect_chat(self, project, key):
+        if self._document().get('project_sessions'): raise ControlError('В режиме проектов используйте команду проекта и новый разговор.')
         self._ready()
         doc = self._document()
         entry = self._resolve(project, key, doc)
@@ -225,6 +250,7 @@ class Manager:
         raise ControlError(uncertain)
 
     def restore_binding(self):
+        if self._document().get('project_sessions'): raise ControlError('В режиме проектов используйте команду проекта и новый разговор.')
         return self.station.rollback()
 
     def open_in_chatgpt(self, project, key):
@@ -237,3 +263,107 @@ class Manager:
         url = 'https://chatgpt.com/c/' + validate_id(cid)
         if not webbrowser.open(url): raise ControlError('Не удалось открыть браузер.')
         return {'url': url}
+
+    def project_status(self, settings, state, doc):
+        if not doc.get('project_sessions'): return {}
+        counts = {}
+        for route in doc['routes']:
+            counts[route['project_id']] = sum(1 for c in settings['chats'] if
+                c.get('project_session') and c.get('gizmo_id') == route['project_id'] and
+                not any(c.get(k) for k in ('conversation_id','voice_session_id','parent_message_id')) and
+                any(x['id']==c['id'] for x in state.get('settings',{}).get('chats',[])))
+        return {'prepared':counts,'hot_preparation':'prepare_chats_v1' in state.get('features',[]),'archive':self.archive_status()}
+
+    def archive_status(self):
+        from pathlib import Path
+        import os
+        from ordinary_archive import projects
+        archive = {'available':False,'ordinary_projects':projects()}
+        try:
+            a=json.loads((Path(os.environ['LOCALAPPDATA'])/'KasControl/Archive/status.json').read_text(encoding='utf-8'))
+            archive={'available':not (Path(os.environ['LOCALAPPDATA'])/'KasControl/Archive/stop').exists() and time.time()-max(a.get('completed_at',0),a.get('heartbeat_at',0))<180,
+                     'remaining':a.get('remaining_sources',0), 'updated':a.get('completed_at') or a.get('heartbeat_at'),'note':a.get('note'),
+                     'empty':a.get('empty_sources',0),'missing':a.get('missing_sources',0),
+                     'blocked':a.get('blocked_sources',0),'voice_copied':a.get('voice_copied',0),'items':a.get('queue',[])}
+            archive.update(ordinary_projects=projects(),ordinary=a.get('ordinary',{}))
+        except (OSError,ValueError,KeyError): pass
+        return archive
+
+    def set_ordinary_archive(self,project,mode):
+        from ordinary_archive import set_project
+        self._project(project)
+        return {'ordinary_projects':set_project(project,mode)}
+
+    def save_project_command(self, project, phrase):
+        self._ready(); name=self._project(project); doc=self._document()
+        if not doc.get('project_sessions'): raise ControlError('Режим команд проектов не включен.')
+        phrase=normalize_phrase(phrase)
+        reserved={'открой чат','закрой чат','заверши чат','хватит'}
+        reserved.update(normalize_phrase(t) for a,t in self.store.native_commands() if a!=1)
+        if phrase in reserved: raise ControlError('Эта фраза занята управлением разговором.')
+        if any(r['phrase']==phrase and r['project_id']!=project for r in doc['routes']):
+            raise ControlError('Эта фраза уже назначена другому проекту.')
+        route=next((r for r in doc['routes'] if r['project_id']==project),None)
+        if route: route['phrase']=phrase
+        else:
+            settings=self.station.read_settings()
+            unmanaged=sum(not c.get('project_session') for c in settings['chats'])
+            if unmanaged+(len(doc['routes'])+1)*8+2>64: raise ControlError('Недостаточно места для запаса еще одного проекта.')
+            ident=str(uuid.uuid4())
+            doc['catalog'].append({'chat_id':ident,'project_id':project,'title':name,'project_name':name,
+                                   'conversation_id':'','parent_message_id':'','project_session':True})
+            doc['routes'].append({'phrase':phrase,'chat_id':ident,'project_id':project,'conversation_id':''})
+        self.store.write(doc)
+        return {'phrase':phrase}
+
+    def remove_project_command(self, project):
+        self._ready(); self._project(project); doc=self._document()
+        if not doc.get('project_sessions'): raise ControlError('Режим команд проектов не включен.')
+        routes=[r for r in doc['routes'] if r['project_id']!=project]
+        if not routes: raise ControlError('Оставьте хотя бы один голосовой проект.')
+        doc['routes']=routes
+        doc['catalog']=[c for c in doc['catalog'] if c['project_id']!=project]
+        self.store.write(doc)
+        return {}
+
+    def open_project(self, project):
+        self._ready(); validate_id(project); doc=self._document()
+        if not doc.get('project_sessions'): raise ControlError('Режим команд проектов не включен.')
+        route=next((r for r in doc['routes'] if r['project_id']==project),None)
+        if not route: raise ControlError('Сначала назначьте команду проекту.')
+        result=json.loads(self.station.run(ROUTER+'/router open '+validate_id(route['chat_id'])+' || true',timeout=60))
+        if result.get('ok') is not True: raise ControlError('Открытие не подтверждено. Обновите состояние.')
+        return result
+
+    def reconnect_project(self,project):
+        snapshot=self.station.management_snapshot();settings=snapshot['settings'];state=snapshot['state']
+        if not snapshot['routes'].get('project_sessions'):raise ControlError('Восстановление доступно в режиме проектов.')
+        validate_id(project)
+        old=next((c for c in settings['chats'] if c['id']==settings.get('selected')),None)
+        if state.get('phase')!='active' or not old or old.get('gizmo_id')!=project:
+            raise ControlError('В выбранном проекте нет активного разговора. Откройте новый разговор.')
+        self.open_project(project)  # Existing router guards teardown, registration and rollback.
+        after=self.station.management_snapshot();current=after['settings']
+        fresh=next((c for c in current['chats'] if c['id']==current.get('selected')), {})
+        prior=next((c for c in current['chats'] if c['id']==old['id']),{})
+        if (after['state'].get('pid')!=state.get('pid') or current.get('voice')!=settings.get('voice')
+                or after['state'].get('phase')!='active' or current.get('selected')==old['id']
+                or fresh.get('gizmo_id')!=project or (old.get('conversation_id') and fresh.get('conversation_id')==old['conversation_id'])
+                or prior.get('conversation_id')!=old.get('conversation_id')):
+            raise ControlError('Переподключение не подтверждено. Обновите состояние; повтор автоматически не выполняется.')
+        return {'reconnected':True,'previous_preserved':True}
+
+    def diagnostics(self):
+        from diagnostics import save
+        from archive_control import ArchiveControl
+        from archive_schedule import enabled,timer_status
+        archive=self.archive_status();archive.update(running=ArchiveControl().working,hourly=enabled(),**timer_status())
+        return save(self.station.management_snapshot(),archive)
+
+    def open_diagnostics_folder(self):
+        import os
+        from pathlib import Path
+        root=Path(os.environ['LOCALAPPDATA'])/'KasControl/Diagnostics'
+        if not root.is_dir():raise ControlError('Сначала соберите диагностику.')
+        os.startfile(str(root))
+        return {}

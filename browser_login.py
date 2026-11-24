@@ -36,7 +36,7 @@ class BrowserSession:
         if not self.authorized:self.cancelled.set()
         return False
     def shutdown(self):
-        self.shutting_down=True
+        self.shutting_down=True;self.cancelled.set()
         if self.window and not self.closed.is_set():self.window.destroy()
     def _evaluate(self,script,timeout=30):
         done=threading.Event();result=[]
@@ -47,6 +47,7 @@ class BrowserSession:
         p=urlsplit(self.window.get_current_url() or '')
         return p.scheme=='https' and p.hostname=='chatgpt.com' and not p.username and not p.password
     def login(self,interactive=True):
+        if self.shutting_down:raise ControlError('Окно входа закрыто.')
         import webview
         auth=json.loads(self.station.run('cat '+B+'/state/web-session.json'))
         expected=identity(auth.get('access_token',''),allow_expired=True)
@@ -55,6 +56,7 @@ class BrowserSession:
         if self.window is None or self.closed.is_set():
             self.closed.clear()
             self.window=webview.create_window('Вход в ChatGPT — Кас', 'https://chatgpt.com/',width=1040,height=780,js_api=None,hidden=not interactive)
+            if self.shutting_down:self.window.destroy();raise ControlError('Окно входа закрыто.')
             self.window.events.closed+=self.closed.set
             self.window.events.closing+=self._on_closing
         elif interactive:self.window.show()
@@ -66,7 +68,13 @@ class BrowserSession:
                     if isinstance(value,dict) and value.get('status')==200 and (value.get('data') or {}).get('accessToken'):
                         actual=identity(value['data']['accessToken'])
                         if actual!=expected:raise ControlError('Войдите в тот же аккаунт ChatGPT, который подключён к колонке.')
-                        self.authorized=True;self.window.hide();return {'signed_in':True}
+                        self.authorized=True;self.window.hide()
+                        from archive_profile import export_archive_login
+                        try:export_archive_login(self.window)
+                        except Exception:
+                            # The main login remains valid if archive login synchronization fails.
+                            pass
+                        return {'signed_in':True}
                     if not interactive and isinstance(value,dict) and (value.get('status') in (200,401,403)):
                         raise ControlError('Нажмите «Войти в ChatGPT» в пульте.')
                 except ControlError:raise
@@ -74,6 +82,8 @@ class BrowserSession:
             self.cancelled.wait(2)
         raise ControlError('Вход не завершён. Откройте окно входа ещё раз.')
     def _request(self,method,url,params=None,json_body=None):
+        from chat_requests import require_cloud_ready,record_rate_limit
+        require_cloud_ready()
         if not self.authorized or self.closed.is_set():raise ControlError('Нажмите «Войти в ChatGPT» в пульте.')
         prefix='https://chatgpt.com'
         if not url.startswith(prefix+'/'):raise ControlError('Недопустимый адрес ChatGPT.')
@@ -86,6 +96,7 @@ class BrowserSession:
         script="(async()=>{const s=await fetch('/api/auth/session',{credentials:'include',redirect:'error'}).then(r=>r.json());if(!s.accessToken)return {status:401};const o="+json.dumps(options)+";o.headers.Authorization='Bearer '+s.accessToken;const r=await fetch("+json.dumps(path)+",o);const t=await r.text();if(t.length>8388608)return {status:413};let data=null;try{data=JSON.parse(t)}catch{}return {status:r.status,data};})()"
         value=self._evaluate(script)
         if not isinstance(value,dict):raise ControlError('Не удалось прочитать ответ веб-клиента ChatGPT.')
+        if value.get('status')==429:record_rate_limit()
         return BrowserResponse(value.get('status',0),value.get('data'))
     def get(self,url,params=None,**kwargs):return self._request('GET',url,params=params)
     def post(self,url,json=None,**kwargs):return self._request('POST',url,json_body=json)

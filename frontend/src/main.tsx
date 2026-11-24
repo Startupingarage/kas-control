@@ -1,3 +1,5 @@
+import {VoicePicker} from './VoicePicker';
+import {ProjectPanel} from './ProjectPanel';
 import React, {useEffect, useRef, useState} from 'react';
 import {createRoot} from 'react-dom/client';
 import {Dialog} from '@base-ui/react/dialog';
@@ -6,6 +8,7 @@ import {AudioLines, ArrowUpRight, Check, ChevronDown, ChevronRight, Folder, Mess
 import {Toaster, toast} from 'sonner';
 import {call, demo, type Chat, type Overview, type Project} from './api';
 import './style.css';
+import './control.css';
 import droidLogo from '../../assets/kas-control.png';
 
 function App(){
@@ -27,10 +30,11 @@ function App(){
   function applyChats(rows:Chat[],key:string){setChats(rows);const pick=rows.find(c=>c.key===key)||rows.find(c=>c.current)||rows[0];setSelected(pick?.key||'');setPhrase(pick?.command||'');}
   async function refresh(wantedProject=project,wantedKey=selected){
     try{
-      const state=await call<Overview>('bootstrap');
+      let state=await call<Overview>('bootstrap_local');
+      if(!state.project_sessions&&typeof window.pywebview?.api.bootstrap_local==='function')state=await call<Overview>('bootstrap');
       setOverview(state);
       const next=state.projects.some(p=>p.id===wantedProject)?wantedProject:state.current.project_id||state.projects[0]?.id||'';
-      const rows=next?await call<Chat[]>('list_chats',next):[];
+      const rows=next&&!state.project_sessions?await call<Chat[]>('list_chats',next):[];
       setProject(next);applyChats(rows,wantedKey);setStale(false);
     }catch(e){setStale(true);throw e;}
   }
@@ -57,6 +61,8 @@ function App(){
     });
   }
   const visibleChats=chats.filter(c=>(c.title+' '+c.command).toLocaleLowerCase().includes(chatQuery.toLocaleLowerCase()));
+  if(!overview)return <div className="startup-shell" aria-busy={!!busy}><section className="startup-card" aria-label="Подключение пульта"><div className="startup-brand"><img src={droidLogo} alt="Core Drone OS"/><span>Kas / Control</span></div><h1>{error?'Не удалось подключиться':'Подключаемся к колонке'}</h1>{error?<><p role="alert">{error}</p><div className="startup-actions"><button disabled={!!busy} onClick={()=>void run('Подключаемся…',()=>refresh())}><RefreshCw size={15}/>Повторить подключение</button><button disabled={!!busy} onClick={()=>void run('Проверяем вход…',async()=>{await call('login_chatgpt');await refresh();})}>Войти в ChatGPT</button></div></>:<><p>Загружаем проекты и состояние колонки.</p><div className="startup-progress" role="status"><LoaderCircle size={18} className="spinning"/><span>Подождите немного…</span></div></>}</section></div>;
+  if(overview.project_sessions)return <ProjectPanel initial={overview}/>;
   return <div className="app" aria-busy={!!busy}>
     <aside className="sidebar">
       <div className="brand"><div className="brand-symbol"><AudioLines size={21}/></div><span>Kas<span className="brand-light"> Control</span></span><img className="brand-droid" src={droidLogo} alt="Core Drone OS"/>{demo&&<span className="demo">Демо</span>}</div>
@@ -67,7 +73,7 @@ function App(){
       <div className="sidebar-bottom"><button className="text-button" disabled={!!busy} onClick={()=>void run('Ожидаю вход в ChatGPT…',async()=>{await call('login_chatgpt');toast.success('Вход выполнен. Обновляю проекты…');await refreshAfter();})}><ArrowUpRight size={17}/>Войти в ChatGPT</button><button className="text-button" disabled={!!busy} onClick={()=>setDialog('commands')}><Command size={17}/>Все команды</button><div className="local-note"><span className={'dot '+(overview?.router_ready?'online':'')}/>{overview?.router_ready?'Команды работают без ПК':'Ожидаю обработчик команд'}</div></div>
     </aside>
     <main>
-      <header className="station-bar"><div className="station-summary"><span className={'dot '+(!stale&&active?'online':'')}/><span>{stale?'Статус не обновлён':active?'Кас подключён':overview?.current.phase==='idle'?'Голосовой сеанс закрыт':'Состояние колонки'}</span><span className="station-chat">{overview?.current.title||'Подключение…'}</span></div><div className="station-loading">{busy&&<div className="refresh-progress" role="progressbar" aria-label={busy}><span className="refresh-track"/><span className="refresh-runner"><img src={droidLogo} alt=""/></span></div>}</div><div className="station-actions"><span className="voice">{overview?.current.voice==='orbit'?'Spruce':overview?.current.voice||'—'}</span><button className="icon-button" title="Обновить состояние" aria-label="Обновить состояние" disabled={!!busy} onClick={()=>void run('Обновляю состояние…',()=>refresh())}><RefreshCw size={16} className={busy?'spinning':''}/></button><button className="icon-button" title="Вернуть предыдущую привязку" aria-label="Вернуть предыдущую привязку" disabled={!!busy||!overview} onClick={()=>void mutate('restore_binding',[],'Предыдущая привязка восстановлена.')}><Undo2 size={17}/></button><button className="quiet-button" disabled={!!busy||!overview} onClick={()=>void mutate('close_session',[],'Голосовой сеанс закрыт.')}><Square size={12}/>Закрыть сеанс</button></div></header>
+      <header className="station-bar"><div className="station-summary"><span className={'dot '+(!stale&&active?'online':'')}/><span>{stale?'Статус не обновлён':active?'Кас подключён':overview?.current.phase==='idle'?'Голосовой сеанс закрыт':'Состояние колонки'}</span><span className="station-chat">{overview?.current.title||'Подключение…'}</span></div><div className="station-loading">{busy&&<div className="refresh-progress" role="progressbar" aria-label={busy}><span className="refresh-track"/><span className="refresh-runner"><img src={droidLogo} alt=""/></span></div>}</div><div className="station-actions"><VoicePicker voice={overview?.current.voice||''} disabled={!!busy||stale||!overview} onSaved={voice=>setOverview(s=>s?({...s,current:{...s.current,voice}}):s)} onBusyChange={value=>{lock.current=value;setBusy(value?'Сохраняю голос…':'');}}/><button className="icon-button" title="Обновить состояние" aria-label="Обновить состояние" disabled={!!busy} onClick={()=>void run('Обновляю состояние…',()=>refresh())}><RefreshCw size={16} className={busy?'spinning':''}/></button><button className="icon-button" title="Вернуть предыдущую привязку" aria-label="Вернуть предыдущую привязку" disabled={!!busy||!overview} onClick={()=>void mutate('restore_binding',[],'Предыдущая привязка восстановлена.')}><Undo2 size={17}/></button><button className="quiet-button" disabled={!!busy||!overview} onClick={()=>void mutate('close_session',[],'Голосовой сеанс закрыт.')}><Square size={12}/>Закрыть сеанс</button></div></header>
       <div className="workspace">
         <section className="project-header"><div><div className="eyebrow">Ваши разговоры</div><h1>{currentProject?.name||'Выберите проект'}</h1><p>Отдельный чат для каждой темы. Своя команда для каждого чата.</p></div><button className="primary" disabled={!!busy||!project} onClick={()=>showCreate('chat')}><Plus size={18}/>Новый чат</button></section>
         {error&&<div className="error-banner" role="alert"><span>{error}</span><button className="icon-button" aria-label="Скрыть сообщение" onClick={()=>setError('')}><X size={16}/></button></div>}

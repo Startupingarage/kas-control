@@ -1,1 +1,26 @@
-{"name":"kas-control-ui","private":true,"version":"1.0.0","type":"module","scripts":{"dev":"vite --host 127.0.0.1","build":"tsc --noEmit && vite build","test":"playwright test"},"dependencies":{"@base-ui/react":"latest","lucide-react":"latest","react":"latest","react-dom":"latest","sonner":"latest"},"devDependencies":{"@playwright/test":"latest","@types/react":"latest","@types/react-dom":"latest","typescript":"latest","vite":"latest"}}
+{
+  "name": "kas-control-ui",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "tsc --noEmit && vite build",
+    "test": "playwright test",
+    "screenshots": "playwright test --config docs.playwright.config.ts"
+  },
+  "dependencies": {
+    "@base-ui/react": "latest",
+    "lucide-react": "latest",
+    "react": "latest",
+    "react-dom": "latest",
+    "sonner": "latest"
+  },
+  "devDependencies": {
+    "@playwright/test": "latest",
+    "@types/react": "latest",
+    "@types/react-dom": "latest",
+    "typescript": "latest",
+    "vite": "latest"
+  }
+}

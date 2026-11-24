@@ -1,0 +1,113 @@
+--- a/engines/native/native/settings.hpp
++++ b/engines/native/native/settings.hpp
+@@ -2,6 +2,7 @@
+ #include "common.hpp"
+ #include <algorithm>
+ #include <set>
++#include <openssl/sha.h>
+ 
+ class Settings {
+     fs::path file;mutable std::mutex mutex;json doc;
+@@ -17,6 +18,54 @@
+         if(doc.value("version",0)!=1||!doc["chats"].is_array()||doc["chats"].size()>64)throw std::runtime_error("invalid_settings");
+     }
+     json view()const{std::lock_guard<std::mutex> lock(mutex);return doc;}
++    static std::string revision(const json &value){
++        const auto text=value.dump();unsigned char hash[SHA256_DIGEST_LENGTH];
++        SHA256(reinterpret_cast<const unsigned char *>(text.data()),text.size(),hash);
++        static const char hex[]="0123456789abcdef";std::string result;
++        for(auto c:hash){result+=hex[c>>4];result+=hex[c&15];}return result;
++    }
++    json prepare_slots(const json &add,const json &remove,const std::string &expected){
++        if(!add.is_array()||!remove.is_array()||add.size()>64||remove.size()>64)
++            throw std::runtime_error("invalid_slot_batch");
++        std::lock_guard<std::mutex> lock(mutex);
++        if(expected!=revision(doc)||read_json(file)!=doc)throw std::runtime_error("settings_changed");
++        auto next=doc;std::set<std::string> retired,ids;
++        for(const auto &idvalue:remove){
++            if(!idvalue.is_string())throw std::runtime_error("invalid_retired_slot");
++            const auto id=idvalue.get<std::string>();const auto &entry=find(id);
++            if(!retired.insert(id).second||id==doc.value("selected",std::string())||id==doc.value("previous",std::string())
++                ||!entry.value("project_session",false)
++                ||(entry.value("conversation_id",std::string()).empty()&&entry.value("voice_session_id",std::string()).empty()))
++                throw std::runtime_error("protected_slot");
++        }
++        next["chats"]=json::array();
++        for(const auto &entry:doc["chats"]){
++            const auto id=entry.at("id").get<std::string>();
++            if(!ids.insert(id).second)throw std::runtime_error("duplicate_existing_slot");
++            if(!retired.count(id))next["chats"].push_back(entry);
++        }
++        static const std::set<std::string> allowed={"id","gizmo_id","title","project_session",
++            "conversation_id","parent_message_id","voice_session_id","account_id","confirmed"};
++        for(const auto &entry:add){
++            if(!entry.is_object())throw std::runtime_error("invalid_new_slot");
++            for(auto i=entry.begin();i!=entry.end();++i)if(!allowed.count(i.key()))throw std::runtime_error("invalid_slot_field");
++            const auto id=entry.at("id").get<std::string>(),project=entry.at("gizmo_id").get<std::string>();
++            bool valid=id.size()==36;
++            for(size_t i=0;i<id.size()&&valid;++i)valid=(i==8||i==13||i==18||i==23)?id[i]=='-':std::string("0123456789abcdef").find(id[i])!=std::string::npos;
++            if(!valid||!ids.insert(id).second||project.size()>128||project.size()<=4||project.rfind("g-p-",0)!=0
++                ||project.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_")!=std::string::npos
++                ||!entry.value("project_session",false)||entry.value("confirmed",false))throw std::runtime_error("invalid_new_slot");
++            for(const char *key:{"conversation_id","parent_message_id","voice_session_id","account_id"})
++                if(!entry.value(key,std::string()).empty())throw std::runtime_error("new_slot_not_empty");
++            const auto title=entry.at("title").get<std::string>();
++            if(title.empty()||title.size()>120||title.find_first_of("\r\n\t")!=std::string::npos)throw std::runtime_error("invalid_title");
++            next["chats"].push_back(entry);
++        }
++        if(next["chats"].size()>64)throw std::runtime_error("chat_limit");
++        // Commit disk first: a failed write must leave the in-memory voice state intact.
++        write_json(file,next);doc.swap(next);
++        return {{"ok",true},{"settings_revision",revision(doc)}};
++    }
+     void voice(std::string value){
+         static const std::set<std::string> allowed={"breeze","cove","ember","fathom","glimmer","juniper","maple","orbit","vale"};
+         if(value=="arbor")value="fathom";if(value=="sol")value="glimmer";if(value=="spruce")value="orbit";
+--- a/engines/native/native/daemon.hpp
++++ b/engines/native/native/daemon.hpp
+@@ -21,7 +21,7 @@
+     std::atomic<bool> ending{false};std::string phase="idle",error;
+     std::string led_style=indicator_environment_style();
+     std::atomic<bool> preparing_cancel{false};unsigned long generation=0;
+-    json last_stats=json::object();unsigned int calls=0;
++    json last_stats=json::object();unsigned int calls=0;bool handling_request=false;
+     void close_cue(){
+         if(test_mode||stopping||ending)return;
+         try{
+@@ -40,6 +40,7 @@
+                 changed.wait_for(lock,std::chrono::seconds(1),[&]{return !requests.empty()||ending||stopping;});
+                 if(ending||stopping)break;if(requests.empty())continue;
+                 request=std::move(requests.front());requests.pop_front();
++                handling_request=true;
+                 phase="connecting";error.clear();preparing_cancel=false;
+             }
+             std::string action=request.value("action",std::string());
+@@ -88,7 +89,7 @@
+             if(agent)agent->idle();
+             bool cue=false;
+             {
+-                std::lock_guard<std::mutex> lock(mutex);call.reset();indicator.reset();phase="idle";
++                std::lock_guard<std::mutex> lock(mutex);call.reset();indicator.reset();phase="idle";handling_request=false;
+                 cue=requests.empty();
+             }
+             if(light){light->send("0\n");light->finish();}
+@@ -140,11 +141,19 @@
+         }
+         info["login_saved"]=fs::exists(state/"web-session.json");
+         auto preferences=settings.view();
++        info["settings_revision"]=Settings::revision(preferences);
++        info["features"]=json::array({"prepare_chats_v1"});
+         for(auto &chat:preferences["chats"]){chat.erase("conversation_id");chat.erase("parent_message_id");chat.erase("voice_session_id");chat.erase("account_id");}
+         info["settings"]=preferences;return info;
+     }
+     json submit(const json &request){
+         const std::string action=request.value("action",std::string());
++        if(action=="prepare_chats"){
++            std::lock_guard<std::mutex> lock(mutex);
++            if(phase!="idle"||call||handling_request||!requests.empty()||ending||stopping||(!test_mode&&(!agent||!agent->connected())))
++                throw std::runtime_error("voice_not_idle");
++            return settings.prepare_slots(request.at("add"),request.at("remove"),request.at("expected_revision").get<std::string>());
++        }
+         if(action=="check"){
+             std::shared_ptr<VoiceCall> active;
+             {std::lock_guard<std::mutex> lock(mutex);if(phase!="active"||!call)throw std::runtime_error("voice_not_connected");active=call;}

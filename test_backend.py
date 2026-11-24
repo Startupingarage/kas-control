@@ -53,6 +53,11 @@ class BindingTests(unittest.TestCase):
              {'gizmo':{'gizmo':{'id':'g-p-hidden','display':{'name':'Hidden'},'is_archived':True}}}]
         self.assertEqual(parse_projects(raw),[{'id':PROJECT,'name':'Core'}])
 
+    def test_project_memory_scope_is_reported_without_assuming_isolation(self):
+        for scope in ('global','project_v2'):
+            parsed=parse_projects([{'gizmo':{'id':PROJECT,'display':{'name':'Core'},'memory_scope':scope}}])
+            self.assertEqual(parsed[0]['memory_scope'],scope)
+
 class FakeStation:
     def __init__(self): self.doc=settings();self.actions=[];self.fail=False;self.phase='idle';self.error=''
     def read_settings(self): return copy.deepcopy(self.doc)
@@ -151,3 +156,29 @@ class SnapshotTests(unittest.TestCase):
         station.ensure_open=changed
         with self.assertRaises(ControlError):controller.connect(PROJECT,CID)
         self.assertEqual(station.actions,[])
+
+class CloudConcurrencyTests(unittest.TestCase):
+    def test_transport_is_published_only_after_authentication_is_complete(self):
+        import threading,json
+        from unittest.mock import Mock,patch
+        station=Mock();station.run.return_value=json.dumps({'access_token':'fake','cookies':{}}).encode()
+        cloud=Cloud(station);transport=Mock();entered=threading.Event();release=threading.Event();errors=[]
+        def headers(_):
+            entered.set();release.wait(3)
+        transport.headers.update.side_effect=headers
+        transport.get.return_value.status_code=200;transport.get.return_value.json.return_value={}
+        def request():
+            try:cloud.request('/test')
+            except Exception as e:errors.append(e)
+        with patch('curl_cffi.requests.Session',return_value=transport) as factory,patch('chat_requests.require_cloud_ready'):
+            first=threading.Thread(target=request);first.start();self.assertTrue(entered.wait(2))
+            self.assertIsNone(cloud.http)
+            second=threading.Thread(target=request);second.start();release.set();first.join(4);second.join(4)
+            self.assertFalse(errors);factory.assert_called_once();self.assertEqual(transport.get.call_count,2)
+
+    def test_cooldown_created_during_pacing_is_not_hidden_or_sent(self):
+        from unittest.mock import Mock,patch
+        cloud=Cloud(None);cloud.http=Mock()
+        with patch('chat_requests.require_cloud_ready',side_effect=[None,ControlError('pause')]),patch('chat_requests.pace_chat_read'):
+            with self.assertRaisesRegex(ControlError,'pause'):cloud.request('/conversation/test')
+        cloud.http.get.assert_not_called()

@@ -10,7 +10,7 @@ class ProjectTests(unittest.TestCase):
         cloud = Mock()
         cloud.http.post.return_value.status_code = 200
         cloud.http.post.return_value.json.return_value = {'resource': {'gizmo': {'id': 'g-p-test'}}}
-        cloud.request.return_value = {'gizmo': {'id': 'g-p-test', 'display': {'name': 'Проект'}}}
+        cloud.request.return_value = {'gizmo': {'id': 'g-p-test', 'display': {'name': 'Проект'},'memory_scope':'global'}}
         return cloud
 
     def test_create_and_readback(self):

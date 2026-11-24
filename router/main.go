@@ -37,9 +37,10 @@ type Route struct {
 	ConversationID string `json:"conversation_id"`
 }
 type Config struct {
-	Version int            `json:"version"`
-	Routes  []Route        `json:"routes"`
-	Catalog []CatalogEntry `json:"catalog"`
+	Version         int            `json:"version"`
+	Routes          []Route        `json:"routes"`
+	Catalog         []CatalogEntry `json:"catalog"`
+	ProjectSessions bool           `json:"project_sessions,omitempty"`
 }
 type Chat struct {
 	ID           string `json:"id"`
@@ -50,12 +51,16 @@ type Chat struct {
 type Settings struct {
 	Version  int    `json:"version"`
 	Selected string `json:"selected"`
+	Previous string `json:"previous"`
 	Chats    []Chat `json:"chats"`
 }
 type Status struct {
-	Phase     string `json:"phase"`
-	Error     string `json:"error"`
-	Connected bool   `json:"agent_connected"`
+	PID       int      `json:"pid"`
+	Features  []string `json:"features"`
+	Revision  string   `json:"settings_revision"`
+	Phase     string   `json:"phase"`
+	Error     string   `json:"error"`
+	Connected bool     `json:"agent_connected"`
 	Native    struct {
 		Mode string `json:"mode"`
 	} `json:"native"`
@@ -130,6 +135,9 @@ func loadConfig(path string) (Config, error) {
 	if e := validateCatalog(c); e != nil {
 		return c, e
 	}
+	if e := validateProjectSessions(c); e != nil {
+		return c, e
+	}
 	for i := range c.Routes {
 		if v, ok := catalogTarget(c, c.Routes[i]); ok {
 			c.Routes[i].ConversationID = v.ConversationID
@@ -187,6 +195,12 @@ func filteredCommands(original []byte, c Config) ([]byte, error) {
 		if len(line) < 3 || line[1] != '\t' || line[0] < '1' || line[0] > '4' {
 			return nil, errors.New("invalid native command")
 		}
+		if c.ProjectSessions {
+			if line[0] == '3' && normalize(line[2:]) == "закрой чат" {
+				out.WriteString("3\tзакрой чат\n")
+			}
+			continue
+		}
 		if phrases[normalize(line[2:])] {
 			if line[0] != '1' {
 				return nil, errors.New("route conflicts with reserved native command")
@@ -195,6 +209,9 @@ func filteredCommands(original []byte, c Config) ([]byte, error) {
 		}
 		out.WriteString(line)
 		out.WriteByte('\n')
+	}
+	if c.ProjectSessions {
+		return []byte("3\tзакрой чат\n"), nil
 	}
 	return []byte(out.String()), nil
 }
@@ -299,6 +316,7 @@ func readFrame(r io.Reader) ([]byte, error) {
 
 type Router struct {
 	dir, voiceDir, api string
+	runtimeDir         string
 	original           []byte
 	client             *http.Client
 	mu                 sync.Mutex
@@ -308,6 +326,10 @@ type Router struct {
 	counters           map[string]uint64
 	lockPath           string
 	backupRoot         string
+	projectIdleSince   time.Time // guarded by the switch lock
+	projectRefillAfter time.Time
+	projectOpenedAt    time.Time
+	projectOpenedID    string
 }
 
 func (r *Router) switchMutex() (*os.File, error) {
@@ -410,19 +432,46 @@ func (r *Router) current(ev Event) bool {
 	defer r.mu.Unlock()
 	return r.ready && r.latest == ev.ID && time.Since(ev.At) < 3*time.Second
 }
+func (r *Router) currentProject(ev Event) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.ready && r.latest == ev.ID && time.Since(ev.At) < 45*time.Second
+}
 func (r *Router) dispatch(ev Event) error {
-	if !r.current(ev) {
-		return errors.New("stale event")
-	}
-	f, e := r.switchMutex()
+	c, e := loadConfig(r.dir + "/routes.json")
 	if e != nil {
-		return errors.New("switch busy; event dropped")
-	}
-	defer unlock(f)
-	if e = r.recoverLocked(); e != nil {
 		return e
 	}
-	c, e := loadConfig(r.dir + "/routes.json")
+	if (!c.ProjectSessions && !r.current(ev)) || (c.ProjectSessions && !r.currentProject(ev)) {
+		return errors.New("stale event")
+	}
+	if c.ProjectSessions {
+		if _, e = r.projectRoute(c, ev.Text); e != nil {
+			return nil
+		}
+	}
+	f, e := r.switchMutex()
+	if e != nil && c.ProjectSessions {
+		r.count("project_commands_waited")
+		for e != nil && r.currentProject(ev) {
+			if !errors.Is(e, syscall.EWOULDBLOCK) && !errors.Is(e, syscall.EAGAIN) {
+				return e
+			}
+			time.Sleep(50 * time.Millisecond)
+			f, e = r.switchMutex()
+		}
+	}
+	if e != nil {
+		return errors.New("switch busy or project command superseded")
+	}
+	defer unlock(f)
+	if c.ProjectSessions && !r.currentProject(ev) {
+		return errors.New("project command superseded while waiting")
+	}
+	if e = r.recoverLocked(false); e != nil {
+		return e
+	}
+	c, e = loadConfig(r.dir + "/routes.json")
 	if e != nil {
 		return e
 	}
@@ -434,7 +483,9 @@ func (r *Router) dispatch(ev Event) error {
 		}
 	}
 	if target == nil {
-		return nil
+		if !c.ProjectSessions || ev.Text != "открой чат" {
+			return nil
+		}
 	}
 	expected, e := filteredCommands(r.original, c)
 	if e != nil {
@@ -444,7 +495,11 @@ func (r *Router) dispatch(ev Event) error {
 	if e != nil || !bytes.Equal(actual, expected) {
 		return errors.New("native aliases not synchronized")
 	}
-	_, e = r.activateLocked(c, *target, &ev)
+	if c.ProjectSessions {
+		_, e = r.openProjectLocked(c, ev.Text, &ev)
+	} else {
+		_, e = r.activateLocked(c, *target, &ev)
+	}
 	return e
 }
 
@@ -523,7 +578,7 @@ func main() {
 		}
 		return
 	}
-	r := Router{dir: base, voiceDir: voice, api: "http://127.0.0.1:18080", client: &http.Client{Timeout: 3 * time.Second, Transport: &http.Transport{Proxy: nil}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
+	r := Router{dir: base, runtimeDir: "/run/kas-command-router", voiceDir: voice, api: "http://127.0.0.1:18080", client: &http.Client{Timeout: 3 * time.Second, Transport: &http.Transport{Proxy: nil}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
 	if len(os.Args) >= 3 && len(os.Args) <= 4 && os.Args[1] == "restore" {
 		held := len(os.Args) == 4 && os.Args[3] == "--held-lock"
 		if len(os.Args) == 4 && !held {
@@ -544,13 +599,22 @@ func main() {
 		_ = json.NewEncoder(os.Stdout).Encode(result)
 		return
 	}
+	if len(os.Args) == 2 && os.Args[1] == "prepare-projects" {
+		if e := r.prepareProjectDrafts(); e != nil {
+			log.Fatal(e)
+		}
+		if e := r.replenishProjectPool(true); e != nil {
+			log.Fatal(e)
+		}
+		return
+	}
 	if len(os.Args) == 2 && os.Args[1] == "recover" {
 		f, e := r.switchMutex()
 		if e != nil {
 			log.Fatal(e)
 		}
 		defer unlock(f)
-		if e = r.recoverLocked(); e != nil {
+		if e = r.recoverLocked(true); e != nil {
 			log.Fatal(e)
 		}
 		return
@@ -584,12 +648,15 @@ func main() {
 	if e != nil {
 		log.Fatal(e)
 	}
-	e = r.recoverLocked()
+	e = r.recoverLocked(false)
 	unlock(f)
 	if e != nil {
 		log.Fatal(e)
 	}
 	if e = r.syncCommands(); e != nil {
+		log.Fatal(e)
+	}
+	if e = r.initRuntime(); e != nil {
 		log.Fatal(e)
 	}
 	signals := make(chan os.Signal, 1)
@@ -612,7 +679,19 @@ func main() {
 				lastError = "configuration not applied or switch busy"
 			}
 			b, _ := json.Marshal(map[string]any{"connected": connected, "ready": connected && e == nil, "worker_pid": os.Getpid(), "updated_unix": time.Now().Unix(), "config_sha256": applied, "last_error": lastError, "counters": counts, "features": []string{"catalog", "lazy_registration"}})
-			_ = atomicWrite(base+"/status.json", b)
+			_ = atomicWrite(r.runtimeFile("status.json"), b)
+		}
+	}()
+	go func() {
+		for {
+			time.Sleep(2 * time.Second)
+			if e := r.prepareProjectDrafts(); e != nil {
+				r.count("project_prepare_failed")
+			}
+			if e := r.replenishProjectPool(false); e != nil {
+				r.count("project_pool_failed")
+				log.Print("project pool preparation: ", e)
+			}
 		}
 	}()
 	queue := make(chan Event, 1)

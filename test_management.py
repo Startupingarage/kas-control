@@ -19,6 +19,10 @@ class ManagementTests(unittest.TestCase):
         self.station.read_settings.side_effect = lambda: copy.deepcopy(self.settings)
         self.station.status.return_value = {'phase': 'active'}
         self.station.run.return_value = b'{"ok":true}'
+        self.station.management_snapshot.side_effect=lambda:{'settings':copy.deepcopy(self.settings),
+            'state':copy.deepcopy(self.station.status.return_value),'routes':copy.deepcopy(self.doc),
+            'routes_hash':'b'*64,'health':{'ready':True,'connected':True,'updated_unix':100,
+                'features':['catalog','lazy_registration']},'now':100,'commands':[]}
         self.control.cloud.projects.return_value = [{'id': P, 'name': 'Project'}]
         self.control.cloud.chats.return_value = [{'id': CID, 'title': 'Cloud title'}]
         self.control.cloud.conversation.return_value = {'gizmo_id': P, 'current_node': 'parent', 'title': 'Cloud title'}

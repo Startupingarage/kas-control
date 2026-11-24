@@ -21,6 +21,12 @@ preview-runtime/
 backups/
 *.lnk
 # Dependencies and generated output
+.local-*
+build-hourly-ui/
+build-tray-ui/
+build-light-tray/
+build-delta-ui/
+build-studio-ui/
 .venv/
 venv/
 __pycache__/
@@ -36,5 +42,6 @@ dist/
 router/router-arm64
 frontend/test-results/
 frontend/playwright-report/
+frontend/screenshots/*.png
 preview.png
 preview.error.txt

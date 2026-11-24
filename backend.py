@@ -12,9 +12,10 @@ import uuid
 
 B = '/data/opt/alisa-standalone'
 BACKUPS = '/data/opt/kas-control-backups'
-SSH = ['wsl.exe', '-d', 'StationLab', '-u', 'stationuser', '--', 'ssh', '-T',
+VOICE_IDS = frozenset(('fathom','breeze','cove','ember','juniper','maple','glimmer','orbit','vale'))
+SSH = [os.path.join(os.environ.get('WINDIR',r'C:\Windows'),'System32','OpenSSH','ssh.exe'), '-T',
        '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8', '-o', 'ServerAliveInterval=5',
-       '-o', 'ServerAliveCountMax=3', '-F', '/home/stationuser/kas-live/ssh_config', 'station']
+       '-o', 'ServerAliveCountMax=3', '-F', os.path.join(os.environ.get('LOCALAPPDATA',os.path.expanduser('~')),'KasControl','SSH','config'), 'station']
 
 class ControlError(Exception):
     pass
@@ -31,7 +32,9 @@ def parse_projects(items):
         g=g.get('gizmo',g)
         if g.get('is_archived') or not str(g.get('id','')).startswith('g-p-'):
             continue
-        result.append({'id':validate_id(g['id']), 'name':g.get('display',{}).get('name') or 'Без названия'})
+        entry={'id':validate_id(g['id']), 'name':g.get('display',{}).get('name') or 'Без названия'}
+        if isinstance(g.get('memory_scope'),str):entry['memory_scope']=g['memory_scope']
+        result.append(entry)
     return result
 
 def make_settings(original,project,metadata,title):
@@ -72,7 +75,7 @@ class Station:
             p=subprocess.run(SSH+['sh','-s'],input=script.encode('utf-8'),capture_output=True,
                              timeout=timeout,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
         except FileNotFoundError:
-            raise ControlError('Не найден WSL. Нужен существующий дистрибутив StationLab.') from None
+            raise ControlError('Не найден клиент Windows OpenSSH. Включите компонент «Клиент OpenSSH» в Windows.') from None
         except subprocess.TimeoutExpired:
             raise ControlError('Превышено время ожидания колонки. Если шло переключение, проверьте состояние и используйте откат.') from None
         if p.returncode:
@@ -84,7 +87,7 @@ class Station:
                         'BUSY':'На колонке уже выполняется переключение.',
                         'NO_BACKUP':'Резервной привязки ещё нет.'}
                 raise ControlError(errors.get(marker[10:],'Колонка отклонила операцию.'))
-            raise ControlError('Нет связи с колонкой или команда не выполнена. Проверьте StationLab и доступность колонки.')
+            raise ControlError('Нет связи с колонкой или команда не выполнена. Проверьте подключение Windows SSH и доступность колонки.')
         return p.stdout
 
     def read_settings(self):
@@ -95,10 +98,42 @@ class Station:
     def status(self):
         return json.loads(self.run(B+'/bin/alisa-standalone status '+B+'/state'))
 
+    def management_snapshot(self):
+        from station_snapshot import management_snapshot
+        return management_snapshot(self)
+
     def command(self,action):
         if action not in ('open','close'):
             raise ControlError('Команда не поддерживается.')
         return json.loads(self.run(B+'/bin/alisa-standalone '+action+' '+B+'/state'))
+
+    def set_voice(self,voice):
+        if not isinstance(voice,str) or voice not in VOICE_IDS:
+            raise ControlError('Выберите голос из списка.')
+        before=self.status()
+        previous=before.get('settings',{}).get('voice')
+        if previous not in VOICE_IDS or not before.get('pid'):
+            raise ControlError('Текущий голос клиента не подтвержден. Обновите состояние.')
+        result={'voice':voice,'previous_voice':previous,'next_session':True}
+        if previous==voice:return result
+        backup=BACKUPS+'/voice-'+time.strftime('%Y%m%d-%H%M%S')+'-'+uuid.uuid4().hex[:8]
+        rollback=f'#!/bin/sh\nset -eu\n{B}/bin/alisa-standalone voice {B}/state {previous}\n'
+        # The daemon owns settings; never overwrite its chat/session updates from a snapshot.
+        script=f'''set -eu
+umask 077
+mkdir -p {backup}
+printf %s {shlex.quote(rollback)} > {backup}/rollback.sh
+{B}/bin/alisa-standalone voice {B}/state {voice}
+'''
+        reply=json.loads(self.run(script))
+        if reply.get('ok') is not True:
+            raise ControlError('Клиент не подтвердил сохранение голоса. Обновите состояние.')
+        after=self.status()
+        saved=self.read_settings()
+        if (after.get('settings',{}).get('voice')!=voice or saved.get('voice')!=voice
+                or before['pid']!=after.get('pid')):
+            raise ControlError('Смена голоса не подтверждена. Обновите состояние; сеанс не перезапускался пультом.')
+        return {**result,'backup':backup}
 
     def install(self,document,expected_hash,was_active):
         if not re.fullmatch('[0-9a-f]{64}',expected_hash or ''):
@@ -282,22 +317,41 @@ echo KAS_CONNECTED
 '''
 
 class Cloud:
-    def __init__(self,station): self.station=station;self.http=None
+    def __init__(self,station): self.station=station;self.http=None;self._http_lock=threading.Lock()
+
+    def transport(self):
+        from curl_cffi import requests
+        with self._http_lock:
+            if self.http is None:
+                auth=json.loads(self.station.run('cat '+B+'/state/web-session.json'))
+                transport=requests.Session(impersonate='chrome')
+                transport.headers.update({'Authorization':'Bearer '+auth['access_token'],
+                    'User-Agent':auth.get('user_agent','Mozilla/5.0'),'Origin':'https://chatgpt.com','Referer':'https://chatgpt.com/'})
+                transport.cookies.update(auth.get('cookies',{}))
+                self.http=transport
+            return self.http
 
     def request(self,path,params=None):
-        from curl_cffi import requests
-        if self.http is None:
-            auth=json.loads(self.station.run('cat '+B+'/state/web-session.json'))
-            self.http=requests.Session(impersonate='chrome')
-            self.http.headers.update({'Authorization':'Bearer '+auth['access_token'],
-                'User-Agent':auth.get('user_agent','Mozilla/5.0'),'Origin':'https://chatgpt.com','Referer':'https://chatgpt.com/'})
-            self.http.cookies.update(auth.get('cookies',{}))
+        from chat_requests import require_cloud_ready
+        require_cloud_ready()
+        transport=self.transport()
         try:
-            r=self.http.get('https://chatgpt.com/backend-api'+path,params=params,timeout=25,allow_redirects=False)
+            if path.startswith('/conversation/'):
+                from chat_requests import pace_chat_read
+                pace_chat_read()
+            require_cloud_ready()
+            r=transport.get('https://chatgpt.com/backend-api'+path,params=params,timeout=25,allow_redirects=False)
+        except ControlError:
+            raise
         except Exception:
             raise ControlError('ChatGPT недоступен с ПК. Проверьте интернет и VPN, затем обновите список.') from None
         if r.status_code!=200:
-            self.http=None
+            if r.status_code==429:
+                from chat_requests import defer_chat_reads,record_rate_limit
+                defer_chat_reads(getattr(r,'headers',{}).get('Retry-After'))
+                record_rate_limit(getattr(r,'headers',{}).get('Retry-After'))
+            with self._http_lock:
+                if self.http is transport:self.http=None
             if r.status_code in (401,403):
                 raise ControlError('ChatGPT отклонил доступ к списку. Обновите список; если ошибка повторяется, проверьте вход клиента колонки.')
             raise ControlError('ChatGPT вернул ошибку '+str(r.status_code)+'. Привязка не изменена.')
