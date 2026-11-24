@@ -146,18 +146,35 @@ your station, then run `sh install.sh` there. The installer is for first
 installation and expects the `/etc/init.d` boot layout. Back up any existing
 router and its configuration before a separate upgrade.
 
-For a fresh station that should use project commands, create
-`/data/opt/kas-command-router/routes.json` with the following initial content
-before installing. The installer preserves an existing configuration file.
+For a fresh station that should use project commands, create a test project
+in ChatGPT first. Open its web page and copy the project ID from the address.
+For an address such as `/g/g-p-0123456789abcdef0123456789abcdef-kitchen/project`,
+the ID is `g-p-0123456789abcdef0123456789abcdef`.
+
+On the prepared station, create `/data/opt/kas-command-router` if needed and
+save the following as `routes.json` there before running `sh install.sh`.
+Replace the example project ID in both places and set the project name.
+Use the same local UUID in both `chat_id` fields. The installer preserves
+this configuration file.
 
 ```json
-{"version":1,"project_sessions":true,"routes":[],"catalog":[]}
+{
+  "version": 1,
+  "project_sessions": true,
+  "routes": [
+    {"phrase": "готовка", "chat_id": "00000000-0000-4000-8000-000000000001", "project_id": "g-p-0123456789abcdef0123456789abcdef", "conversation_id": ""}
+  ],
+  "catalog": [
+    {"chat_id": "00000000-0000-4000-8000-000000000001", "project_id": "g-p-0123456789abcdef0123456789abcdef", "title": "Кухня и рецепты", "project_name": "Кухня и рецепты", "conversation_id": "", "parent_message_id": "", "project_session": true}
+  ]
+}
 ```
 
-This example starts with zero routes. Keep a copy of your current routes before
-migrating a station with fixed-chat bindings. After installation, check that
-`/data/opt/kas-command-router/status.json` reports `ready` and `connected`.
-Then assign the phrases in [Kas Control](../docs/GETTING_STARTED.md).
+Router 4.0 requires at least one route at startup in project mode. This first
+route lets the panel connect and manage the other projects. Keep a copy of
+your routes before migrating from fixed-chat bindings. After installation,
+check that `/data/opt/kas-command-router/status.json` reports `ready` and
+`connected`. Then open [Kas Control](../docs/GETTING_STARTED.md).
 
 The independent hook is `S99zkasroutes`; no voice startup file is changed.
 For rollback remove that exact hook, then run the installed `rollback.sh`.

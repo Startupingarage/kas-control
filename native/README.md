@@ -1,8 +1,9 @@
 # Hot preparation of project chats
 
-`patches/0001-hot-project-slots.patch` adds one control command to the existing
-native voice client. It changes only `settings.hpp` and `daemon.hpp`. It does not
-change voice selection, model parameters, audio handling or face telemetry.
+`patches/alisa-voice-0.3.10.patch` adds the prepared-slot command and passes the
+selected project ID to the native session request. [Build and install from a
+clean checkout](../docs/ALISA_VOICE_0310.md). The older
+`patches/0001-hot-project-slots.patch` targets the original prototype snapshot.
 
 ## Contract
 
@@ -77,10 +78,10 @@ with `go test -race -count=1 ./...` in `router/`. Archive regressions are covere
 
 ## Source compatibility
 
-The patch was written for the native source snapshot used by the prepared-slot
-prototype. Check the two target headers against that patch before building.
-`git apply --check` reports a context mismatch in `daemon.hpp` on upstream
-Alisa Voice 0.3.10. That release needs a compatible port of the patch.
+The 0.3.10 patch targets upstream commit
+`24806ecaea2258bbaa0c779ebceb9fdfeebc66fb`. Its four headers cover the settings
+transaction, daemon lifecycle guard, and project session metadata. Idle is
+published after call teardown so the router can replenish the reserve promptly.
 
 A client already advertising `prepare_chats_v1` can be used as-is. On a client
 without the capability, installation requires one controlled native update with

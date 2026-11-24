@@ -1,4 +1,5 @@
 #include "settings.hpp"
+#include "project_context.hpp"
 #include <cassert>
 #include <condition_variable>
 #include <deque>
@@ -9,6 +10,7 @@
 
 // Test doubles replace network, ALSA and the station agent, never the daemon logic.
 inline std::atomic<bool> hold_auth{false},auth_entered{false};
+inline std::atomic<bool> project_seen{false};
 inline json ensure_web_auth(const fs::path &,std::atomic<bool> *) {
     auth_entered=true;while(hold_auth)std::this_thread::sleep_for(std::chrono::milliseconds(1));return json::object();
 }
@@ -30,13 +32,23 @@ struct CallOptions{
 struct VoiceCall{
     CallOptions options;std::atomic<bool> stopped{false};
     explicit VoiceCall(CallOptions o):options(std::move(o)){}
-    json run(const json &){options.connected();while(!stopped)std::this_thread::sleep_for(std::chrono::milliseconds(1));return json::object();}
+    json run(const json &){
+        project_seen=project_conversation_mode({{"gizmo_id",options.gizmo_id}})==
+            json{{"kind","gizmo_interaction"},{"gizmo_id","g-p-cook"}};
+        options.connected();
+        while(!stopped)std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        return json::object();
+    }
     void stop(){stopped=true;}void interrupt(){}void check(const std::string & = {}){}bool speaking(){return false;}json stats(){return json::object();}
 };
 struct ControlServer{ControlServer(int,const fs::path &,std::function<json()>,std::function<json(const json &)>){}void run(){}};
 #include "daemon_under_test.hpp"
 
 int main(int argc,char **argv){
+    assert(project_conversation_mode(json::object()).at("kind")=="primary_assistant");
+    bool invalid_project=false;
+    try{project_conversation_mode({{"gizmo_id","bad/id"}});}catch(const std::runtime_error &){invalid_project=true;}
+    assert(invalid_project);
     fs::path dir=argv[1];fs::create_directories(dir);
     const std::string id="00000000-0000-4000-8000-000000000001";
     write_json(dir/"settings.json",{{"version",1},{"voice","orbit"},{"selected",id},{"previous",""},
@@ -55,7 +67,7 @@ int main(int argc,char **argv){
     for(int i=0;i<1000&&!prepared;++i){try{prepared=daemon.submit(command()).value("ok",false);}catch(...){}std::this_thread::sleep_for(std::chrono::milliseconds(1));}
     assert(prepared);daemon.submit({{"action","open"}});
     for(int i=0;i<1000&&daemon.status()["phase"]!="active";++i)std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    assert(daemon.status()["phase"]=="active");rejects();
+    assert(daemon.status()["phase"]=="active");assert(project_seen);rejects();
     daemon.submit({{"action","close"}});
-    std::cout<<"PASS queued, connecting, cancelled preparation and active call guards\n";
+    std::cout<<"PASS project context, queued, connecting, cancelled preparation and active call guards\n";
 }
